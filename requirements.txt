@@ -1,0 +1,2 @@
+# stdlib only; Pillow optional for image inspection
+Pillow>=9.0
