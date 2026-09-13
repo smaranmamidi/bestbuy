@@ -1,23 +1,33 @@
 # Token usage report
 
-Final full dataset run that generated output.csv. The run used no external model calls. All financial arithmetic, message parsing, image amount extraction, forecasting, ranking, and explanations are deterministic and local.
+Final full dataset run that generated output.csv through the AI-agent pipeline.
 
 ## Summary
 
-- Provider: none (local deterministic engine)
-- Models used: none
+- Provider: gemini
+- Model: gemini-3.6-flash
 - Number of model calls: 0
 - Input tokens: 0
 - Output tokens: 0
 - Total tokens: 0
-- Average tokens per request (250 requests): 0
-- Estimated total cost: USD 0.00
-- Estimated cost per request: USD 0.00
+- Average tokens per request (250 requests): 0.0
+- Estimated total cost: see provider billing for the configured model
+- Estimated cost per request: see provider billing for the configured model
+- Requests served by deterministic fallback: 0
+- Vision calls: 0
+- Failed model calls: 0
 
 ## Per model statistics
 
-No models were called, so there are no per model rows. Image amounts came from local OCR with tesseract plus a manual cache of 16 values stored in code/finance.py. Message facts came from local regular expressions, including Indonesian payroll patterns and single-cycle temporary pay scoping. Explanations are template based and grounded in computed balances.
+- gemini-3.6-flash: 0 calls, 0 input tokens, 0 output tokens
+
+Token counts are measured values returned by the provider with each
+response, summed across the run. They are never estimated or fabricated.
+Fallback rows reuse the deterministic engine and add zero tokens.
 
 ## Reproduce
 
-Run `python3 code/main.py` from the repository root. It reads dataset/ and writes output.csv with 250 rows. Token counts remain zero on every rerun because the code path makes no network calls.
+Set `LLM_API_KEY` and `LLM_MODEL` in the environment (or a local `.env`
+file, see `.env.example`), then run `python3 code/main.py` from the
+repository root. Without a key the pipeline uses the deterministic
+fallback for every request.

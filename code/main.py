@@ -20,7 +20,20 @@ def norm_methods(s):
     return set(x.strip() for x in (s or "").split("|") if x.strip())
 
 
-def decide_one(data, req):
+def spending_str(stop_ids, reduce_map):
+    if not stop_ids and not reduce_map:
+        return "none"
+    parts = []
+    for eid in sorted(stop_ids):
+        parts.append(f"stop:{eid}")
+    for eid in sorted(reduce_map):
+        parts.append(f"reduce_to:{eid}:{fmt_amount(reduce_map[eid])}")
+    return "|".join(parts)
+
+
+def prepare_request(data, req):
+    """Shared context builder used by both the deterministic entry point and
+    the AI-agent tools. Single implementation, no duplicated logic."""
     user_id = req["user_id"]
     request_id = req["request_id"]
     request_date = parse_date(req["request_date"])
@@ -52,19 +65,32 @@ def decide_one(data, req):
     earliest = earliest_full_date(request_date, start_balance, minimum, forecast, requested)
 
     options = data.options_by_request.get(request_id, [])
-    # candidate evaluation
-    candidates = []  # (rank_tuple, method, plan, spending, status)
+    return {"user_id": user_id, "request_id": request_id, "req": req,
+            "request_date": request_date, "desired": desired, "requested": requested,
+            "allows_partial": allows_partial, "profile": profile, "home": home,
+            "start_balance": start_balance, "minimum": minimum, "consider": consider,
+            "max_inst": max_inst, "facts": facts, "forecast": forecast,
+            "flex_templates": flex_templates, "safe": safe, "earliest": earliest,
+            "options": options}
 
-    def spending_str(stop_ids, reduce_map):
-        if not stop_ids and not reduce_map:
-            return "none"
-        parts = []
-        for eid in sorted(stop_ids):
-            parts.append(f"stop:{eid}")
-        for eid in sorted(reduce_map):
-            parts.append(f"reduce_to:{eid}:{fmt_amount(reduce_map[eid])}")
-        return "|".join(parts)
 
+def evaluate_standard_candidates(data, ctx):
+    """Full, partial, installment and wait candidates. Shared by decide_one
+    and the agent's evaluate_payment_options tool."""
+    request_date = ctx["request_date"]
+    desired = ctx["desired"]
+    requested = ctx["requested"]
+    allows_partial = ctx["allows_partial"]
+    home = ctx["home"]
+    start_balance = ctx["start_balance"]
+    minimum = ctx["minimum"]
+    consider = ctx["consider"]
+    max_inst = ctx["max_inst"]
+    forecast = ctx["forecast"]
+    safe = ctx["safe"]
+    earliest = ctx["earliest"]
+    options = ctx["options"]
+    candidates = []
     # 1. full payment
     if "full_payment" in consider:
         ok, _ = simulate(request_date, start_balance, minimum, forecast, [(request_date, requested)])
@@ -119,7 +145,21 @@ def decide_one(data, req):
             wait_plan = [(earliest, requested)]
             candidates.append(("wait", requested, earliest, 1, "wait",
                                "wait", wait_plan, set(), {}, "affordable_later", []))
+    return candidates
 
+
+def search_flex_plans(data, ctx):
+    """Flexible-spending candidates. Shared by decide_one and the agent's
+    evaluate_spending_changes tool. Single implementation."""
+    request_date = ctx["request_date"]
+    requested = ctx["requested"]
+    profile = ctx["profile"]
+    home = ctx["home"]
+    start_balance = ctx["start_balance"]
+    minimum = ctx["minimum"]
+    consider = ctx["consider"]
+    forecast = ctx["forecast"]
+    flex_templates = ctx["flex_templates"]
     # 5. flexible spending plans (try to make full safe by desired)
     flex_cands = []
     if flex_templates:
@@ -228,30 +268,50 @@ def decide_one(data, req):
                 break
             tried = []
         # end flex
+    return flex_cands
 
-    candidates.extend(flex_cands)
 
-    # ranking among eligible safe that complete by desired (except wait which completes on earliest<=? wait completes on earliest which may be <= desired? sample wait plans complete on earliest which equals desired? Actually wait earliest can equal desired.)
-    # Filter to those completing by desired, except flex already by request_date
-    def completes_by_desired(c):
-        plan = c[6]
-        return plan[-1][0] <= desired
+def evaluate_candidates(data, ctx):
+    """All candidates: standard payment options plus flexible-spending plans."""
+    return evaluate_standard_candidates(data, ctx) + search_flex_plans(data, ctx)
 
-    # rank key: (completes, no_spending, total, start, fewer, option_id)
+
+def rank_key_for(desired):
     def rank_key(c):
         _tag, total, start, npay, optid, method, plan, sids, rd, status, _credits = c
         completes = 0 if plan[-1][0] <= desired else 1
         nospend = 0 if (not sids and not rd) else 1
         return (completes, nospend, total, start, npay, optid)
+    return rank_key
 
-    winner = None
-    if candidates:
-        # only consider those completing by desired first; if none, fallback
-        completing = [c for c in candidates if c[6][-1][0] <= desired]
-        pool = completing if completing else candidates
-        # Affordable_now only if full safe today and method full; else with_plan/later
-        pool_sorted = sorted(pool, key=rank_key)
-        winner = pool_sorted[0]
+
+def rank_candidates(candidates, desired):
+    """Deterministic ranking. Shared by decide_one and rank_strategies tool."""
+    if not candidates:
+        return None
+    # only consider those completing by desired first; if none, fallback
+    completing = [c for c in candidates if c[6][-1][0] <= desired]
+    pool = completing if completing else candidates
+    # Affordable_now only if full safe today and method full; else with_plan/later
+    pool_sorted = sorted(pool, key=rank_key_for(desired))
+    return pool_sorted[0]
+
+
+def decide_one(data, req):
+    ctx = prepare_request(data, req)
+    candidates = evaluate_candidates(data, ctx)
+    request_id = ctx["request_id"]
+    request_date = ctx["request_date"]
+    desired = ctx["desired"]
+    requested = ctx["requested"]
+    home = ctx["home"]
+    start_balance = ctx["start_balance"]
+    minimum = ctx["minimum"]
+    consider = ctx["consider"]
+    forecast = ctx["forecast"]
+    safe = ctx["safe"]
+    earliest = ctx["earliest"]
+    winner = rank_candidates(candidates, desired)
 
     if winner is None:
         # No safe eligible plan completing by desired. Wait only if earliest completes by desired.
@@ -316,11 +376,24 @@ def make_explanation(home, bal, minimum, safe, requested, method, plan, earliest
 
 
 def main():
+    from agent.config import LLMConfig
+    from agent.orchestrator import Agent
+    from agent.usage import UsageTracker
+    cfg = LLMConfig(REPO_ROOT)
+    tracker = UsageTracker()
     data = Data(str(DATASET))
+    agent = Agent(data, cfg, tracker)
+    print("LLM provider=%s model=%s configured=%s" % (
+        cfg.describe()["provider"], "set" if cfg.describe()["model"] != "none" else "none",
+        cfg.is_configured()))
+    if not cfg.is_configured():
+        print("Model unavailable (%s); running agent pipeline with "
+              "deterministic fallback." % cfg.missing_reason())
     rows = []
     for req in data.requests:
         try:
-            rows.append(decide_one(data, req))
+            row, _trace = agent.run_request(req)
+            rows.append(row)
         except Exception as ex:
             requested = Decimal(req["requested_amount"].replace(",", ""))
             rows.append({
@@ -333,7 +406,7 @@ def main():
                 "spending_changes_needed": "none",
                 "decision_explanation": f"Could not complete evaluation, so no payment is recommended. Error noted during processing.",
             })
-            print(f"WARN {req['request_id']}: {ex}", file=sys.stderr)
+            print(f"WARN {req['request_id']}: {type(ex).__name__}", file=sys.stderr)
     cols = ["request_id", "amount_safe_to_pay", "affordability_status", "recommended_payment_method",
             "payment_plan", "earliest_date_for_full_payment", "spending_changes_needed", "decision_explanation"]
     with open(OUT_PATH, "w", newline="", encoding="utf-8") as f:
@@ -341,6 +414,14 @@ def main():
         w.writeheader()
         w.writerows(rows)
     print(f"Wrote {len(rows)} rows to {OUT_PATH}")
+    desc = cfg.describe()
+    tracker.write_report(REPO_ROOT / "evaluation" / "usage_report.md",
+                         {"provider": desc["provider"], "model": desc["model"]},
+                         len(rows))
+    import shutil as _shutil
+    _shutil.copy(REPO_ROOT / "evaluation" / "usage_report.md",
+                 REPO_ROOT / "code" / "evaluation" / "usage_report.md")
+    print("Wrote evaluation/usage_report.md")
 
 
 if __name__ == "__main__":

@@ -1,2 +1,8 @@
-# stdlib only; Pillow optional for image inspection
-Pillow>=9.0
+# No third-party Python packages are required.
+#
+# - The LLM API integration (code/agent/model_client.py) uses the
+#   standard library only (urllib, json, base64) for both OpenAI
+#   and Gemini (generativelanguage.googleapis.com).
+# - Image OCR shells out to the `tesseract` system binary, which must be
+#   installed separately for the OCR fallback path.
+# - Pillow is optional and only useful for ad-hoc image inspection.
